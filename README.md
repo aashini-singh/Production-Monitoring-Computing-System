@@ -10,7 +10,7 @@ not only describe.
 
 ## Run it
 
-You need Python 3.10 or newer.
+You need Python 3.10 or newer
 
 ```
 pip install -r requirements.txt
