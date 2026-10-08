@@ -95,7 +95,7 @@ data/               CSV logs appear here when the monitor runs
 docs/screenshots/   sample screenshots from a test run
 ```
 
-## Syllabus map
+## Syllabus map:
 
 | Unit | Topic | Where |
 |---|---|---|
