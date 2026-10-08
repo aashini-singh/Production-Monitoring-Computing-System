@@ -144,7 +144,7 @@ use your own numbers in the report.
 | 4 | `pipeline.py`, `parallel.py` | Pipelining, Flynn's classification |
 | 5 | `app.py`, `ui.py`, tests, report | Dashboard, results, testing |
 
-## Evidence for the progress report.
+## Evidence for the progress report
 
 1. Run the dashboard, inject each fault, and take your own screenshots.
 2. Download the CSVs from the Logs page.
