@@ -305,3 +305,263 @@ def ieee754_decode(word: int) -> float:
     if exponent == 0:
         return sign * mantissa * 2.0 ** -149
     return sign * (1 + mantissa / float(1 << 23)) * 2.0 ** (exponent - 127)
+
+
+
+def ieee754_add(a: float, b: float) -> IEEE754:
+    """Add two values using IEEE 754 binary32 fields and integer arithmetic."""
+    left = ieee754_encode(a)
+    right = ieee754_encode(b)
+
+    # Handle NaN.
+    if (
+        (left.exponent == 255 and left.mantissa != 0)
+        or (right.exponent == 255 and right.mantissa != 0)
+    ):
+        return ieee754_encode(float("nan"))
+
+    left_inf = left.exponent == 255
+    right_inf = right.exponent == 255
+
+    # Handle infinities.
+    if left_inf and right_inf:
+        if left.sign != right.sign:
+            return ieee754_encode(float("nan"))
+        return ieee754_encode(float("-inf") if left.sign else float("inf"))
+
+    if left_inf:
+        return ieee754_encode(float("-inf") if left.sign else float("inf"))
+
+    if right_inf:
+        return ieee754_encode(float("-inf") if right.sign else float("inf"))
+
+    # Convert each finite operand into:
+    # value = signed_significand * 2**power
+    def unpack_fields(number: IEEE754) -> tuple[int, int]:
+        if number.exponent == 0:
+            significand = number.mantissa
+            power = -149
+        else:
+            significand = (1 << 23) | number.mantissa
+            power = number.exponent - 150
+
+        if number.sign:
+            significand = -significand
+
+        return significand, power
+
+    sig_a, power_a = unpack_fields(left)
+    sig_b, power_b = unpack_fields(right)
+
+    # Preserve negative zero when adding two negative zeros.
+    if sig_a == 0 and sig_b == 0:
+        negative_zero = left.sign == 1 and right.sign == 1
+        return ieee754_encode(-0.0 if negative_zero else 0.0)
+
+    # Align both operands to a common power of two.
+    common_power = min(power_a, power_b)
+
+    exact_sum = (
+        (sig_a << (power_a - common_power))
+        + (sig_b << (power_b - common_power))
+    )
+
+    # Exact cancellation produces positive zero under round-to-nearest.
+    if exact_sum == 0:
+        return ieee754_encode(0.0)
+
+    sign = 1 if exact_sum < 0 else 0
+    magnitude = abs(exact_sum)
+
+    # Round a positive integer right shift using ties-to-even.
+    def round_shift(value: int, shift: int) -> int:
+        if shift <= 0:
+            return value << (-shift)
+
+        quotient = value >> shift
+        remainder = value & ((1 << shift) - 1)
+        halfway = 1 << (shift - 1)
+
+        if remainder > halfway or (
+            remainder == halfway and (quotient & 1)
+        ):
+            quotient += 1
+
+        return quotient
+
+    # Determine the exponent of the exact result.
+    top_bit = magnitude.bit_length() - 1
+    exponent = top_bit + common_power
+
+    # Overflow produces signed infinity.
+    if exponent > 127:
+        return ieee754_encode(float("-inf") if sign else float("inf"))
+
+    if exponent >= -126:
+        # Normal result: retain 24 significant bits.
+        shift = top_bit - 23
+        significand = round_shift(magnitude, shift)
+
+        if significand >= (1 << 24):
+            significand >>= 1
+            exponent += 1
+
+        if exponent > 127:
+            return ieee754_encode(
+                float("-inf") if sign else float("inf")
+            )
+
+        exponent_field = exponent + 127
+        mantissa = significand & 0x7FFFFF
+
+    else:
+        # Subnormal result: round to multiples of 2**-149.
+        shift = -(common_power + 149)
+        mantissa = round_shift(magnitude, shift)
+
+        if mantissa == 0:
+            return ieee754_encode(-0.0 if sign else 0.0)
+
+        if mantissa >= (1 << 23):
+            # Rounding reached the smallest normal number.
+            exponent_field = 1
+            mantissa = 0
+        else:
+            exponent_field = 0
+
+    word = (
+        (sign << 31)
+        | (exponent_field << 23)
+        | mantissa
+    )
+
+    return IEEE754(
+        value=ieee754_decode(word),
+        sign=sign,
+        exponent=exponent_field,
+        mantissa=mantissa,
+        notes=(
+            "IEEE 754 binary32 addition",
+            "Operands aligned using integer powers of two",
+            "Exact integer addition",
+            "Result rounded to binary32 precision",
+        ),
+    )
+
+
+
+def ieee754_multiply(a: float, b: float) -> IEEE754:
+    """Multiply two inputs using IEEE 754 binary32 fields."""
+    left = ieee754_encode(a)
+    right = ieee754_encode(b)
+
+    sign = left.sign ^ right.sign
+
+    # Handle NaN and infinity.
+    if left.exponent == 255 and left.mantissa != 0:
+        return ieee754_encode(float("nan"))
+    if right.exponent == 255 and right.mantissa != 0:
+        return ieee754_encode(float("nan"))
+
+    left_zero = left.exponent == 0 and left.mantissa == 0
+    right_zero = right.exponent == 0 and right.mantissa == 0
+    left_inf = left.exponent == 255
+    right_inf = right.exponent == 255
+
+    if (left_inf and right_zero) or (right_inf and left_zero):
+        return ieee754_encode(float("nan"))
+
+    if left_inf or right_inf:
+        return ieee754_encode(float("-inf") if sign else float("inf"))
+
+    if left_zero or right_zero:
+        return ieee754_encode(-0.0 if sign else 0.0)
+
+    # Restore the hidden leading bit for normal numbers.
+    sig_a = left.mantissa
+    exp_a = left.exponent
+    if exp_a == 0:
+        power_a = -126
+    else:
+        sig_a |= 1 << 23
+        power_a = exp_a - 127
+
+    sig_b = right.mantissa
+    exp_b = right.exponent
+    if exp_b == 0:
+        power_b = -126
+    else:
+        sig_b |= 1 << 23
+        power_b = exp_b - 127
+
+    # Exact integer significand product: up to 48 bits.
+    product = sig_a * sig_b
+    power = power_a + power_b - 46
+
+    # Find the binary exponent of the exact product.
+    top_bit = product.bit_length() - 1
+    exponent = top_bit + power
+
+    # Round an integer right shift using ties-to-even.
+    def round_shift(value: int, shift: int) -> int:
+        if shift <= 0:
+            return value << (-shift)
+        quotient = value >> shift
+        remainder = value & ((1 << shift) - 1)
+        halfway = 1 << (shift - 1)
+        if remainder > halfway or (
+            remainder == halfway and quotient & 1
+        ):
+            quotient += 1
+        return quotient
+
+    # Overflow produces signed infinity.
+    if exponent > 127:
+        return ieee754_encode(float("-inf") if sign else float("inf"))
+
+    # Normal result: retain 24 significant bits, including hidden bit.
+    if exponent >= -126:
+        shift = top_bit - 23
+        significand = round_shift(product, shift)
+
+        if significand >= (1 << 24):
+            significand >>= 1
+            exponent += 1
+
+        if exponent > 127:
+            return ieee754_encode(
+                float("-inf") if sign else float("inf")
+            )
+
+        exp_field = exponent + 127
+        mantissa = significand & 0x7FFFFF
+
+    else:
+        # Subnormal result: fraction units are 2**-149.
+        mantissa = round_shift(product, -(power + 149))
+
+        if mantissa == 0:
+            return ieee754_encode(-0.0 if sign else 0.0)
+
+        if mantissa >= (1 << 23):
+            exp_field = 1
+            mantissa = 0
+        else:
+            exp_field = 0
+
+    word = (sign << 31) | (exp_field << 23) | mantissa
+    value = ieee754_decode(word)
+
+    return IEEE754(
+        value=value,
+        sign=sign,
+        exponent=exp_field,
+        mantissa=mantissa,
+        notes=(
+            "IEEE 754 binary32 multiplication",
+            "Sign = sign_a XOR sign_b",
+            "Significands multiplied using integer arithmetic",
+            "Result rounded to binary32 precision",
+        ),
+    )
+
